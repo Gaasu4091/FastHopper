@@ -79,6 +79,12 @@ public class FastHopperPlugin extends JavaPlugin
   /**
    * Transfers additional items beyond the single item vanilla already moved, up to
    * {@code maxTransferAmount} total.
+   *
+   * <p>Additional items are stacked only onto the slot that vanilla already chose, identified by
+   * finding the slot that now contains {@code movedItem}. This ensures every special-case
+   * inventory constraint (Furnace slot mapping, Brewing Stand ingredient filter, Jukebox disc
+   * check, Crafter disabled slots, Decorated Pot single-stack rule, etc.) is respected
+   * automatically without reimplementing vanilla logic.
    */
   @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
   public void onInventoryMoveItem(InventoryMoveItemEvent event) {
@@ -372,89 +378,73 @@ public class FastHopperPlugin extends JavaPlugin
     return emptySlot;
   }
 
+  /**
+   * Transfers up to {@code amount} additional items from {@code source} into {@code destination}.
+   *
+   * <p>To respect every inventory's special-case slot constraints (Furnace slot mapping, Brewing
+   * Stand ingredient filter, Jukebox disc check, Crafter disabled slots, Decorated Pot
+   * single-stack rule, and any future vanilla additions), the extra items are stacked only onto the
+   * slot that vanilla already chose. That slot is identified by scanning for the first slot that
+   * holds a partial stack of {@code sampleItem} in the destination. If no such slot exists, the
+   * transfer is skipped entirely rather than risking an invalid insertion.
+   */
   private void transferItems(
           Inventory source, Inventory destination, ItemStack sampleItem, int amount) {
     if (isShulkerBoxInventory(destination) && isShulkerBox(sampleItem.getType())) {
       return;
     }
 
-    amount = Math.min(amount, sampleItem.getMaxStackSize());
+    int targetSlot = findPartialStackSlot(destination, sampleItem);
+    if (targetSlot < 0) {
+      return;
+    }
+
+    ItemStack current = destination.getItem(targetSlot);
+    if (current == null || current.getType().isAir()) {
+      return;
+    }
+
+    int stackLimit = Math.min(sampleItem.getMaxStackSize(), destination.getMaxStackSize());
+    int space = stackLimit - current.getAmount();
+    if (space <= 0) {
+      return;
+    }
+
+    amount = Math.min(amount, space);
     amount = Math.min(amount, countSimilarItems(source, sampleItem));
-    amount = Math.min(amount, countDestinationCapacity(destination, sampleItem));
     if (amount <= 0) {
       return;
     }
 
-    int removedAmount = takeSimilarItems(source, sampleItem, amount);
-    if (removedAmount <= 0) {
+    int removed = takeSimilarItems(source, sampleItem, amount);
+    if (removed <= 0) {
       return;
     }
 
-    int remaining = addItemSkippingDisabledSlots(destination, sampleItem, removedAmount);
-    if (remaining <= 0) {
-      return;
-    }
-
-    ItemStack returnStack = sampleItem.clone();
-    returnStack.setAmount(remaining);
-    Map<Integer, ItemStack> sourceLeftovers = source.addItem(returnStack);
-    if (!sourceLeftovers.isEmpty()) {
-      getLogger().warning("Some hopper items could not be restored after a partial transfer.");
-    }
+    ItemStack updated = current.clone();
+    updated.setAmount(current.getAmount() + removed);
+    destination.setItem(targetSlot, updated);
   }
 
   /**
-   * Adds up to {@code amount} items of type {@code sampleItem} into the inventory, skipping
-   * disabled Crafter slots.
-   *
-   * <p>Uses {@link Inventory#getItem} and {@link Inventory#setItem} per slot to avoid overwriting
-   * Crafter disabled-slot state via {@code setStorageContents}.
-   *
-   * @return the number of items that could not be placed (0 means all placed successfully)
+   * Returns the slot index of the first partial stack of {@code sampleItem} in the inventory,
+   * or -1 if none exists.
    */
-  private int addItemSkippingDisabledSlots(
-          Inventory inventory, ItemStack sampleItem, int amount) {
+  private int findPartialStackSlot(Inventory inventory, ItemStack sampleItem) {
     int stackLimit = Math.min(sampleItem.getMaxStackSize(), inventory.getMaxStackSize());
-    int remaining = amount;
     int size = inventory.getSize();
 
-    for (int slot = 0; slot < size && remaining > 0; slot++) {
-      if (isCrafterSlotDisabled(inventory, slot)) {
-        continue;
+    for (int slot = 0; slot < size; slot++) {
+      ItemStack item = inventory.getItem(slot);
+      if (item != null
+              && !item.getType().isAir()
+              && item.isSimilar(sampleItem)
+              && item.getAmount() < stackLimit) {
+        return slot;
       }
-      ItemStack current = inventory.getItem(slot);
-      if (current == null || current.getType().isAir()) {
-        continue;
-      }
-      if (!current.isSimilar(sampleItem)) {
-        continue;
-      }
-      int space = stackLimit - current.getAmount();
-      if (space <= 0) {
-        continue;
-      }
-      int take = Math.min(space, remaining);
-      current.setAmount(current.getAmount() + take);
-      inventory.setItem(slot, current);
-      remaining -= take;
     }
 
-    for (int slot = 0; slot < size && remaining > 0; slot++) {
-      if (isCrafterSlotDisabled(inventory, slot)) {
-        continue;
-      }
-      ItemStack current = inventory.getItem(slot);
-      if (current != null && !current.getType().isAir()) {
-        continue;
-      }
-      int take = Math.min(stackLimit, remaining);
-      ItemStack placed = sampleItem.clone();
-      placed.setAmount(take);
-      inventory.setItem(slot, placed);
-      remaining -= take;
-    }
-
-    return remaining;
+    return -1;
   }
 
   /**
@@ -468,34 +458,6 @@ public class FastHopperPlugin extends JavaPlugin
       return true;
     }
     return false;
-  }
-
-  /**
-   * Calculates the number of additional items the destination inventory can accept, excluding
-   * disabled Crafter slots.
-   */
-  private int countDestinationCapacity(Inventory inventory, ItemStack sampleItem) {
-    int stackLimit = Math.min(sampleItem.getMaxStackSize(), inventory.getMaxStackSize());
-    int capacity = 0;
-    int size = inventory.getSize();
-
-    for (int slot = 0; slot < size; slot++) {
-      if (isCrafterSlotDisabled(inventory, slot)) {
-        continue;
-      }
-      ItemStack item = inventory.getItem(slot);
-      if (item == null || item.getType().isAir()) {
-        capacity += stackLimit;
-      } else if (item.isSimilar(sampleItem)) {
-        capacity += Math.max(0, stackLimit - item.getAmount());
-      }
-
-      if (capacity >= maxTransferAmount) {
-        return maxTransferAmount;
-      }
-    }
-
-    return capacity;
   }
 
   /**
