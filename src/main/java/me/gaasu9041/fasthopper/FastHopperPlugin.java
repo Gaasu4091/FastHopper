@@ -1,5 +1,6 @@
 package me.gaasu9041.fasthopper;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
@@ -424,6 +425,10 @@ public class FastHopperPlugin extends JavaPlugin
     return false;
   }
 
+  @SuppressFBWarnings(
+      value = "NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE",
+      justification =
+          "Folia marks elements nullable, but the storage contents array itself is non-null.")
   private ItemStack[] copyStorageContents(Inventory inventory) {
     return copyStorageContents(inventory.getStorageContents());
   }
