@@ -3,6 +3,7 @@ package me.gaasu9041.fasthopper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Hopper;
 import org.bukkit.command.Command;
@@ -24,15 +25,15 @@ public class FastHopperPlugin extends JavaPlugin
   private static final int defaultTransferAmount = 5;
   private static final int defaultTransferTicks = 8;
   private static final int minTransferAmount = 1;
-  private static final int minTransferTicks = 0;
+  private static final int minTransferTicks = 1;
   private static final int maxTransferAmountLimit = 64;
   private static final String commandName = "fasthopper";
   private static final String adminPermission = "fasthopper.admin";
   private static final String transferAmountPath = "max-transfer-amount";
   private static final String transferTicksPath = "hopper-transfer-ticks";
 
-  private int maxTransferAmount = defaultTransferAmount;
-  private int hopperTransferTicks = defaultTransferTicks;
+  private volatile int maxTransferAmount = defaultTransferAmount;
+  private volatile int hopperTransferTicks = defaultTransferTicks;
 
   @Override
   public void onEnable() {
@@ -67,21 +68,30 @@ public class FastHopperPlugin extends JavaPlugin
 
     int extraAmount = Math.max(0, maxTransferAmount - movedItem.getAmount());
     Inventory initiator = event.getInitiator();
+    Location location = initiator.getLocation();
+    if (location == null) {
+      return;
+    }
+
     Inventory source = event.getSource();
     Inventory destination = event.getDestination();
     ItemStack sampleItem = movedItem.clone();
     getServer()
-        .getScheduler()
-        .runTask(
+        .getRegionScheduler()
+        .runDelayed(
             this,
-            () -> {
-              setTransferCooldown(initiator);
+            location,
+            task -> {
+              if (!setTransferCooldown(initiator)) {
+                return;
+              }
               transferItems(source, destination, sampleItem, extraAmount);
-            });
+            },
+            1L);
   }
 
   @Override
-  public boolean onCommand(
+  public synchronized boolean onCommand(
       CommandSender sender, Command command, String label, String[] args) {
     if (!commandName.equalsIgnoreCase(command.getName())) {
       return false;
@@ -194,7 +204,7 @@ public class FastHopperPlugin extends JavaPlugin
 
   private boolean handleTickCommand(CommandSender sender, String[] args) {
     if (args.length != 2) {
-      sender.sendMessage("Usage: /fasthopper tick <0 or higher>");
+      sender.sendMessage("Usage: /fasthopper tick <1 or higher>");
       return true;
     }
 
@@ -233,7 +243,7 @@ public class FastHopperPlugin extends JavaPlugin
 
   private void sendUsage(CommandSender sender, String label) {
     sender.sendMessage("Usage: /" + label + " transfar <1-64>");
-    sender.sendMessage("Usage: /" + label + " tick <0 or higher>");
+    sender.sendMessage("Usage: /" + label + " tick <1 or higher>");
     sender.sendMessage("Usage: /" + label + " reload");
   }
 
@@ -257,7 +267,7 @@ public class FastHopperPlugin extends JavaPlugin
       configChanged = true;
       if (configuredTicks != hopperTransferTicks) {
         getLogger()
-            .warning(transferTicksPath + " must be at least 0; using " + hopperTransferTicks + ".");
+            .warning(transferTicksPath + " must be at least 1; using " + hopperTransferTicks + ".");
       }
     }
 
@@ -305,10 +315,12 @@ public class FastHopperPlugin extends JavaPlugin
     }
   }
 
-  private void setTransferCooldown(Inventory inventory) {
+  private boolean setTransferCooldown(Inventory inventory) {
     if (inventory.getHolder(false) instanceof Hopper hopper) {
       hopper.setTransferCooldown(hopperTransferTicks);
+      return true;
     }
+    return false;
   }
 
   private int countDestinationCapacity(Inventory inventory, ItemStack sampleItem) {

@@ -18,8 +18,7 @@ public class FastHopperPluginTest {
 
   @Test
   public void clampTransferTicksLimitsValues() {
-    assertEquals(0, FastHopperPlugin.clampTransferTicks(-1));
-    assertEquals(0, FastHopperPlugin.clampTransferTicks(0));
+    assertEquals(1, FastHopperPlugin.clampTransferTicks(0));
     assertEquals(8, FastHopperPlugin.clampTransferTicks(8));
   }
 

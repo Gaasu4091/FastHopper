@@ -1,9 +1,10 @@
 main: ${PACKAGE}.FastHopperPlugin
 name: ${NAME}
 version: "${VERSION}"
-api-version: "1.21.11"
+api-version: "1.21.8"
+folia-supported: true
 author: Gaasu9041
-description: Moves configurable item batches through hoppers.
+description: fasthopper for toritorismp
 commands:
   fasthopper:
     description: Configure FastHopper.
@@ -12,5 +13,5 @@ commands:
       - fh
 permissions:
   fasthopper.admin:
-    description: Allows changing FastHopper settings.
+    description: allows changing fasthopper settings
     default: op
