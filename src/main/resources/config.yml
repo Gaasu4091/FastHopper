@@ -1,0 +1,3 @@
+# Number of items a hopper can move in one transfer.
+# Values below 1 become 1. Values above 64 become 64.
+max-transfer-amount: 5

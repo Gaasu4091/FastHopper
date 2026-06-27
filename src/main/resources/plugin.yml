@@ -1,0 +1,16 @@
+main: ${PACKAGE}.FastHopperPlugin
+name: ${NAME}
+version: "${VERSION}"
+api-version: "1.21.11"
+author: Gaasu9041
+description: Moves configurable item batches through hoppers.
+commands:
+  fasthopper:
+    description: Configure FastHopper.
+    usage: "/<command> set <1-64> | reload"
+    aliases:
+      - fh
+permissions:
+  fasthopper.admin:
+    description: Allows changing FastHopper settings.
+    default: op
