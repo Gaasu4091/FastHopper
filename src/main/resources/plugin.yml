@@ -7,7 +7,7 @@ description: Moves configurable item batches through hoppers.
 commands:
   fasthopper:
     description: Configure FastHopper.
-    usage: "/<command> set <1-64> | reload"
+    usage: "/<command> transfar <1-64> | tick <ticks> | reload"
     aliases:
       - fh
 permissions:

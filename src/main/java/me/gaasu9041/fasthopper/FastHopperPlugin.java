@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.bukkit.Material;
+import org.bukkit.block.Hopper;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -21,13 +22,17 @@ import org.bukkit.plugin.java.JavaPlugin;
 public class FastHopperPlugin extends JavaPlugin
     implements Listener, CommandExecutor, TabCompleter {
   private static final int defaultTransferAmount = 5;
+  private static final int defaultTransferTicks = 8;
   private static final int minTransferAmount = 1;
+  private static final int minTransferTicks = 1;
   private static final int maxTransferAmountLimit = 64;
   private static final String commandName = "fasthopper";
   private static final String adminPermission = "fasthopper.admin";
   private static final String transferAmountPath = "max-transfer-amount";
+  private static final String transferTicksPath = "hopper-transfer-ticks";
 
   private int maxTransferAmount = defaultTransferAmount;
+  private int hopperTransferTicks = defaultTransferTicks;
 
   @Override
   public void onEnable() {
@@ -60,17 +65,19 @@ public class FastHopperPlugin extends JavaPlugin
       return;
     }
 
-    int extraAmount = maxTransferAmount - movedItem.getAmount();
-    if (extraAmount <= 0) {
-      return;
-    }
-
+    int extraAmount = Math.max(0, maxTransferAmount - movedItem.getAmount());
+    Inventory initiator = event.getInitiator();
     Inventory source = event.getSource();
     Inventory destination = event.getDestination();
     ItemStack sampleItem = movedItem.clone();
     getServer()
         .getScheduler()
-        .runTask(this, () -> transferItems(source, destination, sampleItem, extraAmount));
+        .runTask(
+            this,
+            () -> {
+              setTransferCooldown(initiator);
+              transferItems(source, destination, sampleItem, extraAmount);
+            });
   }
 
   @Override
@@ -91,8 +98,12 @@ public class FastHopperPlugin extends JavaPlugin
     }
 
     String subcommand = args[0];
-    if ("set".equalsIgnoreCase(subcommand)) {
-      return handleSetCommand(sender, args);
+    if ("transfar".equalsIgnoreCase(subcommand)) {
+      return handleTransferCommand(sender, args);
+    }
+
+    if ("tick".equalsIgnoreCase(subcommand)) {
+      return handleTickCommand(sender, args);
     }
 
     if ("reload".equalsIgnoreCase(subcommand)) {
@@ -117,8 +128,11 @@ public class FastHopperPlugin extends JavaPlugin
       List<String> suggestions = new ArrayList<>();
       String prefix = args[0].toLowerCase();
 
-      if ("set".startsWith(prefix)) {
-        suggestions.add("set");
+      if ("transfar".startsWith(prefix)) {
+        suggestions.add("transfar");
+      }
+      if ("tick".startsWith(prefix)) {
+        suggestions.add("tick");
       }
       if ("reload".startsWith(prefix)) {
         suggestions.add("reload");
@@ -126,8 +140,13 @@ public class FastHopperPlugin extends JavaPlugin
       return suggestions;
     }
 
-    if (args.length == 2 && "set".equalsIgnoreCase(args[0])) {
-      return List.of(String.valueOf(maxTransferAmount));
+    if (args.length == 2) {
+      if ("transfar".equalsIgnoreCase(args[0])) {
+        return List.of(String.valueOf(maxTransferAmount));
+      }
+      if ("tick".equalsIgnoreCase(args[0])) {
+        return List.of(String.valueOf(hopperTransferTicks));
+      }
     }
 
     return List.of();
@@ -135,6 +154,10 @@ public class FastHopperPlugin extends JavaPlugin
 
   static int clampTransferAmount(int amount) {
     return Math.max(minTransferAmount, Math.min(maxTransferAmountLimit, amount));
+  }
+
+  static int clampTransferTicks(int ticks) {
+    return Math.max(minTransferTicks, ticks);
   }
 
   static boolean isShulkerBox(Material material) {
@@ -152,51 +175,100 @@ public class FastHopperPlugin extends JavaPlugin
     command.setTabCompleter(this);
   }
 
-  private boolean handleSetCommand(CommandSender sender, String[] args) {
+  private boolean handleTransferCommand(CommandSender sender, String[] args) {
     if (args.length != 2) {
-      sender.sendMessage("Usage: /fasthopper set <1-64>");
+      sender.sendMessage("Usage: /fasthopper transfar <1-64>");
       return true;
     }
 
-    int requestedAmount;
-    try {
-      requestedAmount = Integer.parseInt(args[1]);
-    } catch (NumberFormatException exception) {
-      sender.sendMessage("Please enter a whole number.");
+    Integer requestedAmount = parseNumber(sender, args[1]);
+    if (requestedAmount == null) {
       return true;
     }
 
     maxTransferAmount = clampTransferAmount(requestedAmount);
-    saveTransferAmount();
-    reloadSettings();
-    sendStatus(sender);
+    saveSettings();
+    sendTransferAmount(sender);
     return true;
   }
 
+  private boolean handleTickCommand(CommandSender sender, String[] args) {
+    if (args.length != 2) {
+      sender.sendMessage("Usage: /fasthopper tick <1 or higher>");
+      return true;
+    }
+
+    Integer requestedTicks = parseNumber(sender, args[1]);
+    if (requestedTicks == null) {
+      return true;
+    }
+
+    hopperTransferTicks = clampTransferTicks(requestedTicks);
+    saveSettings();
+    sendTransferTicks(sender);
+    return true;
+  }
+
+  private Integer parseNumber(CommandSender sender, String value) {
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException exception) {
+      sender.sendMessage("Please enter a whole number.");
+      return null;
+    }
+  }
+
   private void sendStatus(CommandSender sender) {
+    sendTransferAmount(sender);
+    sendTransferTicks(sender);
+  }
+
+  private void sendTransferAmount(CommandSender sender) {
     sender.sendMessage("Hopper transfer amount is " + maxTransferAmount + ".");
   }
 
+  private void sendTransferTicks(CommandSender sender) {
+    sender.sendMessage("Hopper transfer interval is " + hopperTransferTicks + " ticks.");
+  }
+
   private void sendUsage(CommandSender sender, String label) {
-    sender.sendMessage("Usage: /" + label + " set <1-64>");
+    sender.sendMessage("Usage: /" + label + " transfar <1-64>");
+    sender.sendMessage("Usage: /" + label + " tick <1 or higher>");
     sender.sendMessage("Usage: /" + label + " reload");
   }
 
   private void reloadSettings() {
     int configuredAmount = getConfig().getInt(transferAmountPath, defaultTransferAmount);
+    int configuredTicks = getConfig().getInt(transferTicksPath, defaultTransferTicks);
     maxTransferAmount = clampTransferAmount(configuredAmount);
+    hopperTransferTicks = clampTransferTicks(configuredTicks);
+    boolean configChanged = false;
 
     if (configuredAmount != maxTransferAmount) {
       getConfig().set(transferAmountPath, maxTransferAmount);
-      saveConfig();
+      configChanged = true;
       getLogger()
           .warning(
               transferAmountPath + " must be between 1 and 64; using " + maxTransferAmount + ".");
     }
+
+    if (!getConfig().contains(transferTicksPath) || configuredTicks != hopperTransferTicks) {
+      getConfig().set(transferTicksPath, hopperTransferTicks);
+      configChanged = true;
+      if (configuredTicks != hopperTransferTicks) {
+        getLogger()
+            .warning(transferTicksPath + " must be at least 1; using " + hopperTransferTicks + ".");
+      }
+    }
+
+    if (configChanged) {
+      saveConfig();
+    }
   }
 
-  private void saveTransferAmount() {
+  private void saveSettings() {
     getConfig().set(transferAmountPath, maxTransferAmount);
+    getConfig().set(transferTicksPath, hopperTransferTicks);
     saveConfig();
   }
 
@@ -233,13 +305,16 @@ public class FastHopperPlugin extends JavaPlugin
     }
   }
 
+  private void setTransferCooldown(Inventory inventory) {
+    if (inventory.getHolder(false) instanceof Hopper hopper) {
+      hopper.setTransferCooldown(hopperTransferTicks);
+    }
+  }
+
   private int countDestinationCapacity(Inventory inventory, ItemStack sampleItem) {
     int stackLimit = Math.min(sampleItem.getMaxStackSize(), inventory.getMaxStackSize());
     int capacity = 0;
     ItemStack[] contents = inventory.getStorageContents();
-    if (contents == null) {
-      return 0;
-    }
 
     for (ItemStack item : contents) {
       if (item == null || item.getType().isAir()) {
@@ -258,10 +333,6 @@ public class FastHopperPlugin extends JavaPlugin
 
   private int countSimilarItems(Inventory inventory, ItemStack sampleItem) {
     ItemStack[] contents = inventory.getStorageContents();
-    if (contents == null) {
-      return 0;
-    }
-
     int availableAmount = 0;
     for (ItemStack item : contents) {
       if (item != null && !item.getType().isAir() && item.isSimilar(sampleItem)) {
@@ -286,10 +357,6 @@ public class FastHopperPlugin extends JavaPlugin
 
   private int takeSimilarItems(Inventory inventory, ItemStack sampleItem, int amount) {
     ItemStack[] contents = inventory.getStorageContents();
-    if (contents == null) {
-      return 0;
-    }
-
     int remainingAmount = amount;
 
     for (int slot = 0; slot < contents.length && remainingAmount > 0; slot++) {

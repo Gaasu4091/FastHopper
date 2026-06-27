@@ -17,6 +17,12 @@ public class FastHopperPluginTest {
   }
 
   @Test
+  public void clampTransferTicksLimitsValues() {
+    assertEquals(1, FastHopperPlugin.clampTransferTicks(0));
+    assertEquals(8, FastHopperPlugin.clampTransferTicks(8));
+  }
+
+  @Test
   public void shulkerBoxesCannotEnterShulkerBoxes() {
     assertTrue(FastHopperPlugin.isShulkerBox(Material.SHULKER_BOX));
     assertTrue(FastHopperPlugin.isShulkerBox(Material.PURPLE_SHULKER_BOX));
