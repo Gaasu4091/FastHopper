@@ -2,9 +2,12 @@ package me.gaasu9041.fasthopper;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
+import java.util.logging.Level;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.Block;
+import org.bukkit.block.DoubleChest;
 import org.bukkit.block.Hopper;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -16,7 +19,9 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.inventory.BlockInventoryHolder;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -76,6 +81,15 @@ public class FastHopperPlugin extends JavaPlugin
     Inventory source = event.getSource();
     Inventory destination = event.getDestination();
     ItemStack sampleItem = movedItem.clone();
+    List<InventoryBlock> sourceBlocks = getInventoryBlocks(source);
+    List<InventoryBlock> destinationBlocks = getInventoryBlocks(destination);
+    boolean canBatchTransfer =
+        isSafeBatchInventory(source.getType())
+            && isSafeBatchInventory(destination.getType())
+            && !sourceBlocks.isEmpty()
+            && !destinationBlocks.isEmpty();
+    ItemStack[] destinationBefore =
+        canBatchTransfer ? copyStorageContents(destination) : new ItemStack[0];
     getServer()
         .getRegionScheduler()
         .runDelayed(
@@ -85,7 +99,12 @@ public class FastHopperPlugin extends JavaPlugin
               if (!setTransferCooldown(initiator)) {
                 return;
               }
-              transferItems(source, destination, sampleItem, extraAmount);
+              if (canBatchTransfer
+                  && areInventoryBlocksAvailable(sourceBlocks)
+                  && areInventoryBlocksAvailable(destinationBlocks)) {
+                transferItems(
+                    source, destination, sampleItem, destinationBefore, extraAmount);
+              }
             },
             1L);
   }
@@ -172,6 +191,66 @@ public class FastHopperPlugin extends JavaPlugin
 
   static boolean isShulkerBox(Material material) {
     return material == Material.SHULKER_BOX || material.name().endsWith("_SHULKER_BOX");
+  }
+
+  static boolean isSafeBatchInventory(InventoryType type) {
+    return switch (type) {
+      case BARREL, CHEST, DISPENSER, DROPPER, HOPPER, SHULKER_BOX -> true;
+      default -> false;
+    };
+  }
+
+  static int findInsertedSlot(ItemStack[] before, ItemStack[] after, ItemStack sampleItem) {
+    if (before.length != after.length) {
+      return -1;
+    }
+
+    int changedSlot = -1;
+    for (int slot = 0; slot < after.length; slot++) {
+      ItemStack currentItem = after[slot];
+      if (currentItem == null || !currentItem.isSimilar(sampleItem)) {
+        continue;
+      }
+
+      ItemStack previousItem = before[slot];
+      int previousAmount = 0;
+      if (previousItem != null && previousItem.isSimilar(sampleItem)) {
+        previousAmount = previousItem.getAmount();
+      }
+
+      int increase = currentItem.getAmount() - previousAmount;
+      if (increase > 0) {
+        if (increase != sampleItem.getAmount() || changedSlot >= 0) {
+          return -1;
+        }
+        changedSlot = slot;
+      }
+    }
+
+    return changedSlot;
+  }
+
+  static int takeSimilarItems(ItemStack[] contents, ItemStack sampleItem, int amount) {
+    int remainingAmount = amount;
+
+    for (int slot = 0; slot < contents.length && remainingAmount > 0; slot++) {
+      ItemStack item = contents[slot];
+      if (item == null || item.getType().isAir() || !item.isSimilar(sampleItem)) {
+        continue;
+      }
+
+      int amountTakenFromSlot = Math.min(remainingAmount, item.getAmount());
+      remainingAmount -= amountTakenFromSlot;
+
+      int newAmount = item.getAmount() - amountTakenFromSlot;
+      if (newAmount <= 0) {
+        contents[slot] = null;
+      } else {
+        item.setAmount(newAmount);
+      }
+    }
+
+    return amount - remainingAmount;
   }
 
   private void registerCommand() {
@@ -283,35 +362,57 @@ public class FastHopperPlugin extends JavaPlugin
   }
 
   private void transferItems(
-      Inventory source, Inventory destination, ItemStack sampleItem, int amount) {
-    if (isShulkerBoxInventory(destination) && isShulkerBox(sampleItem.getType())) {
-      return;
-    }
-
-    amount = Math.min(amount, sampleItem.getMaxStackSize());
-    amount = Math.min(amount, countSimilarItems(source, sampleItem));
-    amount = Math.min(amount, countDestinationCapacity(destination, sampleItem));
+      Inventory source,
+      Inventory destination,
+      ItemStack sampleItem,
+      ItemStack[] destinationBefore,
+      int amount) {
     if (amount <= 0) {
       return;
     }
 
-    int removedAmount = takeSimilarItems(source, sampleItem, amount);
+    if (isShulkerBoxInventory(destination) && isShulkerBox(sampleItem.getType())) {
+      return;
+    }
+
+    ItemStack[] destinationCurrent = copyStorageContents(destination);
+    int destinationSlot = findInsertedSlot(destinationBefore, destinationCurrent, sampleItem);
+    if (destinationSlot < 0) {
+      return;
+    }
+
+    ItemStack destinationItem = destinationCurrent[destinationSlot];
+    if (destinationItem == null || !destinationItem.isSimilar(sampleItem)) {
+      return;
+    }
+
+    int stackLimit = Math.min(destinationItem.getMaxStackSize(), destination.getMaxStackSize());
+    amount = Math.min(amount, stackLimit - destinationItem.getAmount());
+    amount = Math.min(amount, sampleItem.getMaxStackSize());
+    ItemStack[] sourceBefore = copyStorageContents(source);
+    amount = Math.min(amount, countSimilarItems(sourceBefore, sampleItem, amount));
+    if (amount <= 0) {
+      return;
+    }
+
+    ItemStack[] sourceAfter = copyStorageContents(sourceBefore);
+    int removedAmount = takeSimilarItems(sourceAfter, sampleItem, amount);
     if (removedAmount <= 0) {
       return;
     }
 
-    ItemStack transferStack = sampleItem.clone();
-    transferStack.setAmount(removedAmount);
+    ItemStack destinationAfter = destinationItem.clone();
+    destinationAfter.setAmount(destinationAfter.getAmount() + removedAmount);
 
-    Map<Integer, ItemStack> leftovers = destination.addItem(transferStack);
-    if (leftovers.isEmpty()) {
-      return;
-    }
-
-    ItemStack[] leftoverItems = leftovers.values().toArray(ItemStack[]::new);
-    Map<Integer, ItemStack> sourceLeftovers = source.addItem(leftoverItems);
-    if (!sourceLeftovers.isEmpty()) {
-      getLogger().warning("Some hopper items could not be restored after a partial transfer.");
+    try {
+      source.setStorageContents(sourceAfter);
+      destination.setItem(destinationSlot, destinationAfter);
+    } catch (RuntimeException exception) {
+      boolean restored =
+          restoreInventories(
+              source, sourceBefore, destination, destinationSlot, destinationItem);
+      String result = restored ? "restored the previous state" : "rollback also failed";
+      getLogger().log(Level.SEVERE, "Batch transfer failed; " + result + ".", exception);
     }
   }
 
@@ -323,36 +424,30 @@ public class FastHopperPlugin extends JavaPlugin
     return false;
   }
 
-  private int countDestinationCapacity(Inventory inventory, ItemStack sampleItem) {
-    int stackLimit = Math.min(sampleItem.getMaxStackSize(), inventory.getMaxStackSize());
-    int capacity = 0;
-    ItemStack[] contents = inventory.getStorageContents();
-
-    for (ItemStack item : contents) {
-      if (item == null || item.getType().isAir()) {
-        capacity += stackLimit;
-      } else if (item.isSimilar(sampleItem)) {
-        capacity += Math.max(0, stackLimit - item.getAmount());
-      }
-
-      if (capacity >= maxTransferAmount) {
-        return maxTransferAmount;
-      }
-    }
-
-    return capacity;
+  private ItemStack[] copyStorageContents(Inventory inventory) {
+    return copyStorageContents(inventory.getStorageContents());
   }
 
-  private int countSimilarItems(Inventory inventory, ItemStack sampleItem) {
-    ItemStack[] contents = inventory.getStorageContents();
+  private ItemStack[] copyStorageContents(ItemStack[] contents) {
+    ItemStack[] copy = new ItemStack[contents.length];
+    for (int slot = 0; slot < contents.length; slot++) {
+      if (contents[slot] != null) {
+        copy[slot] = contents[slot].clone();
+      }
+    }
+    return copy;
+  }
+
+  private int countSimilarItems(
+      ItemStack[] contents, ItemStack sampleItem, int requiredAmount) {
     int availableAmount = 0;
     for (ItemStack item : contents) {
       if (item != null && !item.getType().isAir() && item.isSimilar(sampleItem)) {
         availableAmount += item.getAmount();
       }
 
-      if (availableAmount >= maxTransferAmount) {
-        return maxTransferAmount;
+      if (availableAmount >= requiredAmount) {
+        return requiredAmount;
       }
     }
 
@@ -367,32 +462,64 @@ public class FastHopperPlugin extends JavaPlugin
     return inventory.getType() == InventoryType.SHULKER_BOX;
   }
 
-  private int takeSimilarItems(Inventory inventory, ItemStack sampleItem, int amount) {
-    ItemStack[] contents = inventory.getStorageContents();
-    int remainingAmount = amount;
-
-    for (int slot = 0; slot < contents.length && remainingAmount > 0; slot++) {
-      ItemStack item = contents[slot];
-      if (item == null || item.getType().isAir() || !item.isSimilar(sampleItem)) {
-        continue;
-      }
-
-      int amountTakenFromSlot = Math.min(remainingAmount, item.getAmount());
-      remainingAmount -= amountTakenFromSlot;
-
-      int newAmount = item.getAmount() - amountTakenFromSlot;
-      if (newAmount <= 0) {
-        contents[slot] = null;
-      } else {
-        item.setAmount(newAmount);
-      }
-    }
-
-    int takenAmount = amount - remainingAmount;
-    if (takenAmount > 0) {
-      inventory.setStorageContents(contents);
-    }
-
-    return takenAmount;
+  private List<InventoryBlock> getInventoryBlocks(Inventory inventory) {
+    List<InventoryBlock> blocks = new ArrayList<>();
+    collectInventoryBlocks(inventory.getHolder(false), blocks);
+    return List.copyOf(blocks);
   }
+
+  private void collectInventoryBlocks(
+      InventoryHolder holder, List<InventoryBlock> blocks) {
+    if (holder instanceof BlockInventoryHolder blockHolder) {
+      Block block = blockHolder.getBlock();
+      blocks.add(new InventoryBlock(block.getLocation().clone(), block.getType()));
+      return;
+    }
+
+    if (holder instanceof DoubleChest doubleChest) {
+      collectInventoryBlocks(doubleChest.getLeftSide(false), blocks);
+      collectInventoryBlocks(doubleChest.getRightSide(false), blocks);
+    }
+  }
+
+  private boolean areInventoryBlocksAvailable(List<InventoryBlock> inventoryBlocks) {
+    for (InventoryBlock inventoryBlock : inventoryBlocks) {
+      Location location = inventoryBlock.location();
+      if (!Bukkit.isOwnedByCurrentRegion(location)) {
+        return false;
+      }
+
+      Block block = location.getBlock();
+      if (block.getType() != inventoryBlock.material()
+          || !(block.getState(false) instanceof InventoryHolder)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean restoreInventories(
+      Inventory source,
+      ItemStack[] sourceBefore,
+      Inventory destination,
+      int destinationSlot,
+      ItemStack destinationItem) {
+    boolean restored = true;
+    try {
+      source.setStorageContents(sourceBefore);
+    } catch (RuntimeException exception) {
+      restored = false;
+      getLogger().log(Level.SEVERE, "Could not restore the source inventory.", exception);
+    }
+
+    try {
+      destination.setItem(destinationSlot, destinationItem);
+    } catch (RuntimeException exception) {
+      restored = false;
+      getLogger().log(Level.SEVERE, "Could not restore the destination inventory.", exception);
+    }
+    return restored;
+  }
+
+  private record InventoryBlock(Location location, Material material) {}
 }
