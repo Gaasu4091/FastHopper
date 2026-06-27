@@ -24,7 +24,7 @@ public class FastHopperPlugin extends JavaPlugin
   private static final int defaultTransferAmount = 5;
   private static final int defaultTransferTicks = 8;
   private static final int minTransferAmount = 1;
-  private static final int minTransferTicks = 1;
+  private static final int minTransferTicks = 0;
   private static final int maxTransferAmountLimit = 64;
   private static final String commandName = "fasthopper";
   private static final String adminPermission = "fasthopper.admin";
@@ -194,7 +194,7 @@ public class FastHopperPlugin extends JavaPlugin
 
   private boolean handleTickCommand(CommandSender sender, String[] args) {
     if (args.length != 2) {
-      sender.sendMessage("Usage: /fasthopper tick <1 or higher>");
+      sender.sendMessage("Usage: /fasthopper tick <0 or higher>");
       return true;
     }
 
@@ -233,7 +233,7 @@ public class FastHopperPlugin extends JavaPlugin
 
   private void sendUsage(CommandSender sender, String label) {
     sender.sendMessage("Usage: /" + label + " transfar <1-64>");
-    sender.sendMessage("Usage: /" + label + " tick <1 or higher>");
+    sender.sendMessage("Usage: /" + label + " tick <0 or higher>");
     sender.sendMessage("Usage: /" + label + " reload");
   }
 
@@ -257,7 +257,7 @@ public class FastHopperPlugin extends JavaPlugin
       configChanged = true;
       if (configuredTicks != hopperTransferTicks) {
         getLogger()
-            .warning(transferTicksPath + " must be at least 1; using " + hopperTransferTicks + ".");
+            .warning(transferTicksPath + " must be at least 0; using " + hopperTransferTicks + ".");
       }
     }
 
