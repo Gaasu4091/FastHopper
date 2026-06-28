@@ -1,11 +1,20 @@
 package me.gaasu9041.fasthopper;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.logging.Level;
+import org.bukkit.Effect;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.block.Crafter;
+import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.block.Hopper;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -17,24 +26,33 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
+/**
+ * change hopper speed, transfer
+ */
 public class FastHopperPlugin extends JavaPlugin
         implements Listener, CommandExecutor, TabCompleter {
-  private static final int defaultTransferAmount = 5;
-  private static final int defaultTransferTicks = 8;
-  private static final int minTransferAmount = 1;
-  private static final int minTransferTicks = 1;
-  private static final int maxTransferAmountLimit = 64;
+  private static final int defaultAmount = 5;
+  private static final int defaultTick = 8;
+  private static final int minAmount = 1;
+  private static final int minTick = 1;
+  private static final int maxAmountLimit = 64;
   private static final String commandName = "fasthopper";
   private static final String adminPermission = "fasthopper.admin";
   private static final String transferAmountPath = "max-transfer-amount";
   private static final String transferTicksPath = "hopper-transfer-ticks";
+  private static final String spigotConfigFieldName = "spigotConfig";
+  private static final String amountFieldName = "hopperAmount";
+  private static final String tickFieldName = "hopperTransfer";
 
-  private volatile int maxTransferAmount = defaultTransferAmount;
-  private volatile int hopperTransferTicks = defaultTransferTicks;
+  private final Map<UUID, HopperSettings> originalSettings = new HashMap<>();
+  private volatile int maxTransferAmount = defaultAmount;
+  private volatile int hopperTransferTicks = defaultTick;
+  private NativeComposterAccess nativeComposterAccess;
 
   @Override
   public void onEnable() {
@@ -42,87 +60,93 @@ public class FastHopperPlugin extends JavaPlugin
     reloadSettings();
     registerCommand();
     getServer().getPluginManager().registerEvents(this, this);
+
+    try {
+      nativeComposterAccess = NativeComposterAccess.resolve();
+      applySettingsToLoadedWorlds();
+    } catch (ReflectiveOperationException exception) {
+      getLogger()
+              .log(
+                      Level.SEVERE,
+                      "FastHopper cannot access Folia/Paper's native hopper settings. "
+                              + "The plugin will be disabled to avoid non-vanilla transfers.",
+                      exception);
+      getServer().getPluginManager().disablePlugin(this);
+    }
   }
 
   /**
-   * Cancels vanilla hopper transfers into disabled Crafter slots or into a Shulker Box when the
-   * transferred item is itself a Shulker Box.
+   * composter move
    */
   @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-  public void onInventoryMoveItemHighest(InventoryMoveItemEvent event) {
-    if (!isHopperInventory(event.getInitiator())) {
-      return;
-    }
-
-    Inventory destination = event.getDestination();
+  public void onComposterMove(InventoryMoveItemEvent event) {
     ItemStack movedItem = event.getItem();
-
-    if (isShulkerBoxInventory(destination) && isShulkerBox(movedItem.getType())) {
-      event.setCancelled(true);
+    if (event.getInitiator().getType() != InventoryType.HOPPER
+            || event.getSource().getType() != InventoryType.HOPPER
+            || event.getDestination().getType() != InventoryType.COMPOSTER
+            || movedItem.getAmount() <= 1
+            || !movedItem.getType().isCompostable()) {
       return;
     }
 
-    if (!isCrafterInventory(destination)) {
+    Location sourceLocation = event.getSource().getLocation();
+    Location composterLocation = event.getDestination().getLocation();
+    if (sourceLocation == null || composterLocation == null) {
       return;
     }
 
-    if (!hasCrafterDisabledSlot(destination)) {
-      return;
-    }
-
-    int destinationSlot = findVanillaDestinationSlot(destination, movedItem);
-    if (destinationSlot < 0 || isCrafterSlotDisabled(destination, destinationSlot)) {
-      event.setCancelled(true);
-    }
-  }
-
-  /**
-   * Transfers additional items beyond the single item vanilla already moved, up to
-   * {@code maxTransferAmount} total.
-   *
-   * <p>Additional items are stacked only onto the slot that vanilla already chose, identified by
-   * finding the slot that now contains {@code movedItem}. This ensures every special-case
-   * inventory constraint (Furnace slot mapping, Brewing Stand ingredient filter, Jukebox disc
-   * check, Crafter disabled slots, Decorated Pot single-stack rule, etc.) is respected
-   * automatically without reimplementing vanilla logic.
-   */
-  @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-  public void onInventoryMoveItem(InventoryMoveItemEvent event) {
-    if (!isHopperInventory(event.getInitiator())) {
-      return;
-    }
-
-    ItemStack movedItem = event.getItem();
-    if (movedItem == null || movedItem.getType().isAir()) {
-      return;
-    }
-
-    int extraAmount = Math.max(0, maxTransferAmount - movedItem.getAmount());
-    if (extraAmount <= 0) {
-      return;
-    }
-
-    Inventory initiator = event.getInitiator();
-    Location location = initiator.getLocation();
-    if (location == null) {
-      return;
-    }
-
-    Inventory source = event.getSource();
-    Inventory destination = event.getDestination();
+    int transferAmount = Math.min(maxTransferAmount, movedItem.getAmount());
     ItemStack sampleItem = movedItem.clone();
+    sampleItem.setAmount(1);
+    event.setCancelled(true);
+
     getServer()
             .getRegionScheduler()
             .runDelayed(
                     this,
-                    location,
-                    task -> {
-                      if (!setTransferCooldown(initiator)) {
-                        return;
-                      }
-                      transferItems(source, destination, sampleItem, extraAmount);
-                    },
+                    composterLocation,
+                    task ->
+                            transferToComposter(
+                                    sourceLocation, composterLocation, sampleItem, transferAmount),
                     1L);
+  }
+
+  @Override
+  public synchronized void onDisable() {
+    for (World world : getServer().getWorlds()) {
+      HopperSettings settings = originalSettings.get(world.getUID());
+      if (settings == null) {
+        continue;
+      }
+
+      try {
+        writeNativeSettings(world, settings);
+      } catch (ReflectiveOperationException exception) {
+        getLogger()
+                .log(
+                        Level.WARNING,
+                        "Could not restore native hopper settings for world " + world.getName(),
+                        exception);
+      }
+    }
+    originalSettings.clear();
+  }
+
+  /** Applies the configured values to worlds that are loaded after this plugin is enabled. */
+  @EventHandler
+  public synchronized void onWorldLoad(WorldLoadEvent event) {
+    try {
+      applySettings(event.getWorld());
+    } catch (ReflectiveOperationException exception) {
+      getLogger()
+              .log(
+                      Level.SEVERE,
+                      "Could not apply native hopper settings to world "
+                              + event.getWorld().getName()
+                              + ". FastHopper will be disabled.",
+                      exception);
+      getServer().getPluginManager().disablePlugin(this);
+    }
   }
 
   @Override
@@ -142,20 +166,16 @@ public class FastHopperPlugin extends JavaPlugin
       return true;
     }
 
-    String subcommand = args[0];
-    if ("transfar".equalsIgnoreCase(subcommand)) {
+    if ("transfar".equalsIgnoreCase(args[0])) {
       return handleTransferCommand(sender, args);
     }
 
-    if ("tick".equalsIgnoreCase(subcommand)) {
+    if ("tick".equalsIgnoreCase(args[0])) {
       return handleTickCommand(sender, args);
     }
 
-    if ("reload".equalsIgnoreCase(subcommand)) {
-      reloadConfig();
-      reloadSettings();
-      sendStatus(sender);
-      return true;
+    if ("reload".equalsIgnoreCase(args[0])) {
+      return handleReloadCommand(sender);
     }
 
     sendUsage(sender, label);
@@ -165,23 +185,17 @@ public class FastHopperPlugin extends JavaPlugin
   @Override
   public List<String> onTabComplete(
           CommandSender sender, Command command, String alias, String[] args) {
-    if (!commandName.equalsIgnoreCase(command.getName())) {
+    if (!commandName.equalsIgnoreCase(command.getName())
+            || !sender.hasPermission(adminPermission)) {
       return List.of();
     }
 
     if (args.length == 1) {
+      String prefix = args[0].toLowerCase(Locale.ROOT);
       List<String> suggestions = new ArrayList<>();
-      String prefix = args[0].toLowerCase();
-
-      if ("transfar".startsWith(prefix)) {
-        suggestions.add("transfar");
-      }
-      if ("tick".startsWith(prefix)) {
-        suggestions.add("tick");
-      }
-      if ("reload".startsWith(prefix)) {
-        suggestions.add("reload");
-      }
+      addIfMatching(suggestions, "transfar", prefix);
+      addIfMatching(suggestions, "tick", prefix);
+      addIfMatching(suggestions, "reload", prefix);
       return suggestions;
     }
 
@@ -198,22 +212,23 @@ public class FastHopperPlugin extends JavaPlugin
   }
 
   static int clampTransferAmount(int amount) {
-    return Math.max(minTransferAmount, Math.min(maxTransferAmountLimit, amount));
+    return Math.max(minAmount, Math.min(maxAmountLimit, amount));
   }
 
   static int clampTransferTicks(int ticks) {
-    return Math.max(minTransferTicks, ticks);
+    return Math.max(minTick, ticks);
   }
 
-  static boolean isShulkerBox(Material material) {
-    return material == Material.SHULKER_BOX || material.name().endsWith("_SHULKER_BOX");
+  private static void addIfMatching(List<String> suggestions, String value, String prefix) {
+    if (value.startsWith(prefix)) {
+      suggestions.add(value);
+    }
   }
 
   private void registerCommand() {
     PluginCommand command = getCommand(commandName);
     if (command == null) {
-      getLogger().severe("Command " + commandName + " is missing from plugin.yml.");
-      return;
+      throw new IllegalStateException("Command " + commandName + " is missing from plugin.yml.");
     }
 
     command.setExecutor(this);
@@ -230,8 +245,17 @@ public class FastHopperPlugin extends JavaPlugin
     if (requestedAmount == null) {
       return true;
     }
+    if (requestedAmount < minAmount || requestedAmount > maxAmountLimit) {
+      sender.sendMessage("Transfer amount must be between 1 and 64.");
+      return true;
+    }
 
-    maxTransferAmount = clampTransferAmount(requestedAmount);
+    int previousAmount = maxTransferAmount;
+    maxTransferAmount = requestedAmount;
+    if (!tryApplyCommandSettings(sender, previousAmount, hopperTransferTicks)) {
+      return true;
+    }
+
     saveSettings();
     sendTransferAmount(sender);
     return true;
@@ -247,11 +271,69 @@ public class FastHopperPlugin extends JavaPlugin
     if (requestedTicks == null) {
       return true;
     }
+    if (requestedTicks < minTick) {
+      sender.sendMessage("Transfer interval must be at least 1 tick.");
+      return true;
+    }
 
-    hopperTransferTicks = clampTransferTicks(requestedTicks);
+    int previousTicks = hopperTransferTicks;
+    hopperTransferTicks = requestedTicks;
+    if (!tryApplyCommandSettings(sender, maxTransferAmount, previousTicks)) {
+      return true;
+    }
+
     saveSettings();
     sendTransferTicks(sender);
     return true;
+  }
+
+  private boolean handleReloadCommand(CommandSender sender) {
+    int previousAmount = maxTransferAmount;
+    int previousTicks = hopperTransferTicks;
+    reloadConfig();
+    reloadSettings();
+
+    try {
+      applySettingsToLoadedWorlds();
+    } catch (ReflectiveOperationException exception) {
+      maxTransferAmount = previousAmount;
+      hopperTransferTicks = previousTicks;
+      restoreActiveSettingsAfterFailure(exception);
+      sender.sendMessage("Could not apply the reloaded hopper settings. See the server log.");
+      return true;
+    }
+
+    sendStatus(sender);
+    return true;
+  }
+
+  private boolean tryApplyCommandSettings(
+          CommandSender sender, int previousAmount, int previousTicks) {
+    try {
+      applySettingsToLoadedWorlds();
+      return true;
+    } catch (ReflectiveOperationException exception) {
+      maxTransferAmount = previousAmount;
+      hopperTransferTicks = previousTicks;
+      restoreActiveSettingsAfterFailure(exception);
+      sender.sendMessage("Could not apply the hopper settings. See the server log.");
+      return false;
+    }
+  }
+
+  private void restoreActiveSettingsAfterFailure(ReflectiveOperationException originalFailure) {
+    getLogger().log(Level.SEVERE, "Could not update native hopper settings.", originalFailure);
+    try {
+      applySettingsToLoadedWorlds();
+    } catch (ReflectiveOperationException rollbackFailure) {
+      originalFailure.addSuppressed(rollbackFailure);
+      getLogger()
+              .log(
+                      Level.SEVERE,
+                      "Could not restore the previous hopper settings. FastHopper will be disabled.",
+                      rollbackFailure);
+      getServer().getPluginManager().disablePlugin(this);
+    }
   }
 
   private Integer parseNumber(CommandSender sender, String value) {
@@ -283,8 +365,8 @@ public class FastHopperPlugin extends JavaPlugin
   }
 
   private void reloadSettings() {
-    int configuredAmount = getConfig().getInt(transferAmountPath, defaultTransferAmount);
-    int configuredTicks = getConfig().getInt(transferTicksPath, defaultTransferTicks);
+    int configuredAmount = getConfig().getInt(transferAmountPath, defaultAmount);
+    int configuredTicks = getConfig().getInt(transferTicksPath, defaultTick);
     maxTransferAmount = clampTransferAmount(configuredAmount);
     hopperTransferTicks = clampTransferTicks(configuredTicks);
     boolean configChanged = false;
@@ -324,203 +406,176 @@ public class FastHopperPlugin extends JavaPlugin
     saveConfig();
   }
 
-  /**
-   * Returns {@code true} if the inventory is a Crafter and has at least one disabled slot.
-   */
-  private boolean hasCrafterDisabledSlot(Inventory inventory) {
-    if (!(inventory.getHolder(false) instanceof Crafter crafter)) {
+  private void transferToComposter(
+          Location sourceLocation,
+          Location composterLocation,
+          ItemStack sampleItem,
+          int transferAmount) {
+    Block sourceBlock = sourceLocation.getBlock();
+    Block composterBlock = composterLocation.getBlock();
+    if (sourceBlock.getType() != Material.HOPPER
+            || composterBlock.getType() != Material.COMPOSTER
+            || !(sourceBlock.getState(false) instanceof Hopper hopper)) {
+      return;
+    }
+
+    Inventory source = hopper.getInventory();
+    int sourceSlot = findFirstSimilarSlot(source, sampleItem);
+    if (sourceSlot < 0) {
+      return;
+    }
+
+    for (int transferred = 0; transferred < transferAmount; transferred++) {
+      if (!canCompostAnotherItem(composterBlock)) {
+        return;
+      }
+
+      ItemStack sourceItem = source.getItem(sourceSlot);
+      if (sourceItem == null || !sourceItem.isSimilar(sampleItem)) {
+        return;
+      }
+
+      ItemStack originalSourceItem = sourceItem.clone();
+      removeOneItem(source, sourceSlot, sourceItem);
+
+      try {
+        boolean raisedLevel = nativeComposterAccess.addItem(composterBlock, sampleItem);
+        composterBlock
+                .getWorld()
+                .playEffect(
+                        composterLocation,
+                        Effect.COMPOSTER_FILL_ATTEMPT,
+                        raisedLevel ? 1 : 0);
+      } catch (ReflectiveOperationException exception) {
+        source.setItem(sourceSlot, originalSourceItem);
+        getLogger().log(Level.SEVERE, "Could not run the native composter transfer.", exception);
+        return;
+      }
+    }
+  }
+
+  private boolean canCompostAnotherItem(Block composterBlock) {
+    if (composterBlock.getType() != Material.COMPOSTER) {
       return false;
     }
-    int size = inventory.getSize();
-    for (int i = 0; i < size; i++) {
-      if (crafter.isSlotDisabled(i)) {
-        return true;
-      }
+    if (!(composterBlock.getBlockData() instanceof org.bukkit.block.data.Levelled levelled)) {
+      return false;
     }
-    return false;
+    return levelled.getLevel() < 7;
   }
 
-  /**
-   * Returns {@code true} if the given slot in the Crafter inventory is disabled.
-   *
-   * <p>Returns {@code false} if the holder is not a {@link Crafter}.
-   */
-  private boolean isCrafterSlotDisabled(Inventory inventory, int slot) {
-    if (inventory.getHolder(false) instanceof Crafter crafter) {
-      return crafter.isSlotDisabled(slot);
-    }
-    return false;
-  }
-
-  /**
-   * Returns the slot index that vanilla would place {@code item} into, or -1 if no valid slot
-   * exists.
-   *
-   * <p>Mirrors vanilla hopper logic: prefer an existing partial stack first, then the first empty
-   * slot.
-   */
-  private int findVanillaDestinationSlot(Inventory inventory, ItemStack item) {
-    int size = inventory.getSize();
-    int stackLimit = Math.min(item.getMaxStackSize(), inventory.getMaxStackSize());
-    int emptySlot = -1;
-
-    for (int slot = 0; slot < size; slot++) {
-      ItemStack current = inventory.getItem(slot);
-      if (current == null || current.getType().isAir()) {
-        if (emptySlot < 0) {
-          emptySlot = slot;
-        }
-      } else if (current.isSimilar(item) && current.getAmount() < stackLimit) {
-        return slot;
-      }
-    }
-
-    return emptySlot;
-  }
-
-  /**
-   * Transfers up to {@code amount} additional items from {@code source} into {@code destination}.
-   *
-   * <p>To respect every inventory's special-case slot constraints (Furnace slot mapping, Brewing
-   * Stand ingredient filter, Jukebox disc check, Crafter disabled slots, Decorated Pot
-   * single-stack rule, and any future vanilla additions), the extra items are stacked only onto the
-   * slot that vanilla already chose. That slot is identified by scanning for the first slot that
-   * holds a partial stack of {@code sampleItem} in the destination. If no such slot exists, the
-   * transfer is skipped entirely rather than risking an invalid insertion.
-   */
-  private void transferItems(
-          Inventory source, Inventory destination, ItemStack sampleItem, int amount) {
-    if (isShulkerBoxInventory(destination) && isShulkerBox(sampleItem.getType())) {
-      return;
-    }
-
-    int targetSlot = findPartialStackSlot(destination, sampleItem);
-    if (targetSlot < 0) {
-      return;
-    }
-
-    ItemStack current = destination.getItem(targetSlot);
-    if (current == null || current.getType().isAir()) {
-      return;
-    }
-
-    int stackLimit = Math.min(sampleItem.getMaxStackSize(), destination.getMaxStackSize());
-    int space = stackLimit - current.getAmount();
-    if (space <= 0) {
-      return;
-    }
-
-    amount = Math.min(amount, space);
-    amount = Math.min(amount, countSimilarItems(source, sampleItem));
-    if (amount <= 0) {
-      return;
-    }
-
-    int removed = takeSimilarItems(source, sampleItem, amount);
-    if (removed <= 0) {
-      return;
-    }
-
-    ItemStack updated = current.clone();
-    updated.setAmount(current.getAmount() + removed);
-    destination.setItem(targetSlot, updated);
-  }
-
-  /**
-   * Returns the slot index of the first partial stack of {@code sampleItem} in the inventory,
-   * or -1 if none exists.
-   */
-  private int findPartialStackSlot(Inventory inventory, ItemStack sampleItem) {
-    int stackLimit = Math.min(sampleItem.getMaxStackSize(), inventory.getMaxStackSize());
-    int size = inventory.getSize();
-
-    for (int slot = 0; slot < size; slot++) {
+  private int findFirstSimilarSlot(Inventory inventory, ItemStack sampleItem) {
+    for (int slot = 0; slot < inventory.getSize(); slot++) {
       ItemStack item = inventory.getItem(slot);
-      if (item != null
-              && !item.getType().isAir()
-              && item.isSimilar(sampleItem)
-              && item.getAmount() < stackLimit) {
+      if (item != null && item.isSimilar(sampleItem)) {
         return slot;
       }
     }
-
     return -1;
   }
 
-  /**
-   * Sets the transfer cooldown on the hopper that initiated the transfer.
-   *
-   * <p>Returns {@code true} if the cooldown was applied successfully.
-   */
-  private boolean setTransferCooldown(Inventory inventory) {
-    if (inventory.getHolder(false) instanceof Hopper hopper) {
-      hopper.setTransferCooldown(hopperTransferTicks);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Counts how many items similar to {@code sampleItem} are available in the inventory, up to
-   * {@code maxTransferAmount}.
-   */
-  private int countSimilarItems(Inventory inventory, ItemStack sampleItem) {
-    int size = inventory.getSize();
-    int available = 0;
-
-    for (int slot = 0; slot < size; slot++) {
-      ItemStack item = inventory.getItem(slot);
-      if (item != null && !item.getType().isAir() && item.isSimilar(sampleItem)) {
-        available += item.getAmount();
-      }
-      if (available >= maxTransferAmount) {
-        return maxTransferAmount;
-      }
+  private void removeOneItem(Inventory inventory, int slot, ItemStack item) {
+    if (item.getAmount() == 1) {
+      inventory.setItem(slot, null);
+      return;
     }
 
-    return available;
+    ItemStack reducedItem = item.clone();
+    reducedItem.setAmount(item.getAmount() - 1);
+    inventory.setItem(slot, reducedItem);
   }
 
-  /**
-   * Removes up to {@code amount} items similar to {@code sampleItem} from the inventory using
-   * per-slot {@link Inventory#setItem} calls.
-   *
-   * @return the number of items actually removed
-   */
-  private int takeSimilarItems(Inventory inventory, ItemStack sampleItem, int amount) {
-    int size = inventory.getSize();
-    int remaining = amount;
+  private void applySettingsToLoadedWorlds() throws ReflectiveOperationException {
+    for (World world : getServer().getWorlds()) {
+      applySettings(world);
+    }
+  }
 
-    for (int slot = 0; slot < size && remaining > 0; slot++) {
-      ItemStack item = inventory.getItem(slot);
-      if (item == null || item.getType().isAir() || !item.isSimilar(sampleItem)) {
-        continue;
-      }
+  private void applySettings(World world) throws ReflectiveOperationException {
+    NativeHopperConfig nativeConfig = resolveNativeConfig(world);
+    originalSettings.putIfAbsent(world.getUID(), nativeConfig.read());
+    nativeConfig.write(new HopperSettings(maxTransferAmount, hopperTransferTicks));
+  }
 
-      int take = Math.min(remaining, item.getAmount());
-      remaining -= take;
+  private void writeNativeSettings(World world, HopperSettings settings)
+          throws ReflectiveOperationException {
+    resolveNativeConfig(world).write(settings);
+  }
 
-      int newAmount = item.getAmount() - take;
-      if (newAmount <= 0) {
-        inventory.setItem(slot, null);
-      } else {
-        item.setAmount(newAmount);
-        inventory.setItem(slot, item);
-      }
+  private NativeHopperConfig resolveNativeConfig(World world) throws ReflectiveOperationException {
+    Method getHandle = world.getClass().getMethod("getHandle");
+    Object worldHandle = getHandle.invoke(world);
+    Field spigotConfigField = worldHandle.getClass().getField(spigotConfigFieldName);
+    Object spigotConfig = spigotConfigField.get(worldHandle);
+    Field amountField = spigotConfig.getClass().getField(amountFieldName);
+    Field ticksField = spigotConfig.getClass().getField(tickFieldName);
+    return new NativeHopperConfig(spigotConfig, amountField, ticksField);
+  }
+
+  private record HopperSettings(int amount, int ticks) {}
+
+  private record NativeHopperConfig(Object config, Field amountField, Field ticksField) {
+    private HopperSettings read() throws IllegalAccessException {
+      return new HopperSettings(amountField.getInt(config), ticksField.getInt(config));
     }
 
-    return amount - remaining;
+    private void write(HopperSettings settings) throws IllegalAccessException {
+      amountField.setInt(config, settings.amount());
+      ticksField.setInt(config, settings.ticks());
+    }
   }
 
-  private boolean isHopperInventory(Inventory inventory) {
-    return inventory.getType() == InventoryType.HOPPER;
-  }
+  private record NativeComposterAccess(
+          Class<?> blockPosClass,
+          java.lang.reflect.Constructor<?> blockPosConstructor,
+          Method getBlockStateMethod,
+          Method asNmsCopyMethod,
+          Method addItemMethod) {
+    private static NativeComposterAccess resolve() throws ReflectiveOperationException {
+      Class<?> blockPos = Class.forName("net.minecraft.core.BlockPos");
+      Class<?> serverLevel = Class.forName("net.minecraft.server.level.ServerLevel");
+      Class<?> nmsItemStack = Class.forName("net.minecraft.world.item.ItemStack");
+      Class<?> composterBlock = Class.forName("net.minecraft.world.level.block.ComposterBlock");
+      Class<?> craftItemStack =
+              Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
 
-  private boolean isShulkerBoxInventory(Inventory inventory) {
-    return inventory.getType() == InventoryType.SHULKER_BOX;
-  }
+      java.lang.reflect.Constructor<?> constructor =
+              blockPos.getConstructor(int.class, int.class, int.class);
+      Method getBlockState = serverLevel.getMethod("getBlockState", blockPos);
+      Method asNmsCopy = craftItemStack.getMethod("asNMSCopy", ItemStack.class);
+      Method addItem = findNativeAddItemMethod(composterBlock, nmsItemStack);
+      addItem.setAccessible(true);
 
-  private boolean isCrafterInventory(Inventory inventory) {
-    return inventory.getType() == InventoryType.CRAFTER;
+      return new NativeComposterAccess(
+              blockPos, constructor, getBlockState, asNmsCopy, addItem);
+    }
+
+    private static Method findNativeAddItemMethod(Class<?> composterBlock, Class<?> nmsItemStack)
+            throws NoSuchMethodException {
+      for (Method method : composterBlock.getDeclaredMethods()) {
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (method.getName().equals("addItem")
+                && Modifier.isStatic(method.getModifiers())
+                && parameterTypes.length == 5
+                && parameterTypes[4] == nmsItemStack) {
+          return method;
+        }
+      }
+      throw new NoSuchMethodException("ComposterBlock.addItem");
+    }
+
+    private boolean addItem(Block composter, ItemStack item)
+            throws ReflectiveOperationException {
+      World world = composter.getWorld();
+      Method getHandle = world.getClass().getMethod("getHandle");
+      Object worldHandle = getHandle.invoke(world);
+      Object blockPos =
+              blockPosConstructor.newInstance(composter.getX(), composter.getY(), composter.getZ());
+      Object oldBlockState = getBlockStateMethod.invoke(worldHandle, blockPos);
+      Object nmsItem = asNmsCopyMethod.invoke(null, item);
+      Object newBlockState =
+              addItemMethod.invoke(null, null, oldBlockState, worldHandle, blockPos, nmsItem);
+      return !oldBlockState.equals(newBlockState);
+    }
   }
 }
