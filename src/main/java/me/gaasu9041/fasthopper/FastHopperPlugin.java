@@ -132,7 +132,9 @@ public class FastHopperPlugin extends JavaPlugin
     originalSettings.clear();
   }
 
-  /** Applies the configured values to worlds that are loaded after this plugin is enabled. */
+  /**
+   * Applies the configured values to worlds that are loaded after this plugin is enabled.
+   */
   @EventHandler
   public synchronized void onWorldLoad(WorldLoadEvent event) {
     try {
@@ -426,7 +428,8 @@ public class FastHopperPlugin extends JavaPlugin
     }
 
     for (int transferred = 0; transferred < transferAmount; transferred++) {
-      if (!canCompostAnotherItem(composterBlock)) {
+      int oldLevel = getComposterLevel(composterBlock);
+      if (oldLevel < 0 || oldLevel >= 7) {
         return;
       }
 
@@ -447,21 +450,21 @@ public class FastHopperPlugin extends JavaPlugin
                         Effect.COMPOSTER_FILL_ATTEMPT,
                         raisedLevel ? 1 : 0);
       } catch (ReflectiveOperationException exception) {
-        source.setItem(sourceSlot, originalSourceItem);
+        if (getComposterLevel(composterBlock) == oldLevel) {
+          source.setItem(sourceSlot, originalSourceItem);
+        }
         getLogger().log(Level.SEVERE, "Could not run the native composter transfer.", exception);
         return;
       }
     }
   }
 
-  private boolean canCompostAnotherItem(Block composterBlock) {
-    if (composterBlock.getType() != Material.COMPOSTER) {
-      return false;
+  private int getComposterLevel(Block composterBlock) {
+    if (composterBlock.getType() == Material.COMPOSTER
+            && composterBlock.getBlockData() instanceof org.bukkit.block.data.Levelled levelled) {
+      return levelled.getLevel();
     }
-    if (!(composterBlock.getBlockData() instanceof org.bukkit.block.data.Levelled levelled)) {
-      return false;
-    }
-    return levelled.getLevel() < 7;
+    return -1;
   }
 
   private int findFirstSimilarSlot(Inventory inventory, ItemStack sampleItem) {
@@ -512,7 +515,8 @@ public class FastHopperPlugin extends JavaPlugin
     return new NativeHopperConfig(spigotConfig, amountField, ticksField);
   }
 
-  private record HopperSettings(int amount, int ticks) {}
+  private record HopperSettings(int amount, int ticks) {
+  }
 
   private record NativeHopperConfig(Object config, Field amountField, Field ticksField) {
     private HopperSettings read() throws IllegalAccessException {
